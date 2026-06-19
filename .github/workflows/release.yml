@@ -1,0 +1,147 @@
+name: Build and release data pack
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build release zip
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate JSON files
+        run: |
+          python -m json.tool pack.mcmeta >/dev/null
+          find data -name '*.json' -print0 | xargs -0 -n1 python -m json.tool >/dev/null
+
+      - name: Compute semantic version
+        id: version
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+
+          semver_tag = re.compile(r"^v\d+\.\d+\.\d+$")
+          head_tags = [
+              tag
+              for tag in git("tag", "--points-at", "HEAD").splitlines()
+              if semver_tag.match(tag)
+          ]
+          if head_tags:
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                  output.write("should_release=false\n")
+                  output.write(f"tag_name={head_tags[0]}\n")
+              raise SystemExit(0)
+
+          tags = [
+              tag
+              for tag in git("tag", "--list", "v[0-9]*", "--sort=-v:refname").splitlines()
+              if semver_tag.match(tag)
+          ]
+          latest_tag = tags[0] if tags else ""
+          log_range = f"{latest_tag}..HEAD" if latest_tag else "HEAD"
+          raw_messages = git("log", "--format=%B%x00", log_range)
+          messages = [message.strip() for message in raw_messages.split("\0") if message.strip()]
+
+          level = "patch"
+          for message in messages:
+              header = message.splitlines()[0]
+              if re.match(r"^[a-zA-Z]+(?:\([^)]+\))?!:", header) or "BREAKING CHANGE:" in message:
+                  level = "major"
+                  break
+              if level != "minor" and re.match(r"^feat(?:\([^)]+\))?:", header):
+                  level = "minor"
+
+          if latest_tag:
+              major, minor, patch = map(int, latest_tag.removeprefix("v").split("."))
+          else:
+              major, minor, patch = 0, 0, 0
+
+          if level == "major":
+              major += 1
+              minor = 0
+              patch = 0
+          elif level == "minor":
+              minor += 1
+              patch = 0
+          else:
+              patch += 1
+
+          version = f"{major}.{minor}.{patch}"
+          tag_name = f"v{version}"
+          notes = [
+              f"Automated release for {tag_name}.",
+              "",
+              f"Version bump: {level}",
+              f"Previous version: {latest_tag or 'none'}",
+              "",
+              "Commits:",
+          ]
+          for message in messages:
+              header = message.splitlines()[0]
+              notes.append(f"- {header}")
+
+          with open("release_notes.md", "w", encoding="utf-8") as notes_file:
+              notes_file.write("\n".join(notes) + "\n")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("should_release=true\n")
+              output.write(f"version={version}\n")
+              output.write(f"tag_name={tag_name}\n")
+              output.write(f"bump={level}\n")
+          PY
+
+      - name: Build data pack zip
+        if: steps.version.outputs.should_release == 'true'
+        run: |
+          python - <<'PY'
+          import os
+          import zipfile
+
+          version = os.environ["VERSION"]
+          zip_name = f"fix-junglesaps-v{version}.zip"
+          include_roots = ["pack.mcmeta", "README.md", "data"]
+
+          with zipfile.ZipFile(zip_name, "w", compression=zipfile.ZIP_DEFLATED) as pack:
+              for root in include_roots:
+                  if os.path.isfile(root):
+                      pack.write(root, root)
+                      continue
+
+                  for current_dir, _, files in os.walk(root):
+                      for filename in sorted(files):
+                          path = os.path.join(current_dir, filename)
+                          pack.write(path, path)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"zip_name={zip_name}\n")
+          PY
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        id: build
+
+      - name: Create GitHub release
+        if: steps.version.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+          ZIP_NAME: ${{ steps.build.outputs.zip_name }}
+        run: |
+          gh release create "$TAG_NAME" "$ZIP_NAME" \
+            --target "$GITHUB_SHA" \
+            --title "Fix Jungle Saplings $TAG_NAME" \
+            --notes-file release_notes.md
