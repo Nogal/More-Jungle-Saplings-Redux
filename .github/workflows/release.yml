@@ -113,7 +113,7 @@ jobs:
           import zipfile
 
           version = os.environ["VERSION"]
-          zip_name = f"fix-junglesaps-v{version}.zip"
+          zip_name = f"more-jungle-saplings-redux-v{version}.zip"
           include_roots = ["pack.mcmeta", "README.md", "data"]
 
           with zipfile.ZipFile(zip_name, "w", compression=zipfile.ZIP_DEFLATED) as pack:
@@ -143,5 +143,5 @@ jobs:
         run: |
           gh release create "$TAG_NAME" "$ZIP_NAME" \
             --target "$GITHUB_SHA" \
-            --title "Fix Jungle Saplings $TAG_NAME" \
+            --title "More Jungle Saplings Redux $TAG_NAME" \
             --notes-file release_notes.md
